@@ -1,0 +1,14 @@
+# ignorar arquivos de log
+*.log
+
+#ignorar arquivos temporários
+*.tmp
+
+#ignorar arquivos de cache
+*.cache
+
+#ignorar arquivos de build
+/build/
+
+#ignorar arquivos de .venv
+.venv/

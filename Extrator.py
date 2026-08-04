@@ -1,0 +1,210 @@
+import pdfplumber
+import re
+import os
+from datetime import datetime, timedelta, time as dtime
+import openpyxl
+
+# Regex para cabeçalho
+padrao_funcionario = re.compile(r"(\d{6})\s*-\s*([A-ZÀ-ÚÇ\s]+?)\s+Admiss")
+padrao_cargo = re.compile(r"Cargo:\s*\d+\s*-\s*([A-ZÀ-ÚÇ\s\-]+?)\s+Filial")
+padrao_periodo = re.compile(r"Período\s*:\s*(\d{2}/\d{2}/\d{4})\s*a\s*(\d{2}/\d{2}/\d{4})")
+
+# Faixas de coordenada X das colunas
+X_DT_MIN, X_DT_MAX = 10, 32
+X_PONTO_MIN, X_PONTO_MAX = 78, 230
+X_EXTRA_MIN, X_EXTRA_MAX = 231, 530
+
+padrao_hora = re.compile(r"^([0-2]?\d:[0-5]\d)$")
+
+# Função para agrupar palavras por linha com base na coordenada Y
+def agrupar_por_linha(palavras, tolerancia=2):
+    linhas = []
+    for p in sorted(palavras, key=lambda w: w["top"]):
+        adicionado = False
+        for linha in linhas:
+            if abs(linha[0]["top"] - p["top"]) <= tolerancia:
+                linha.append(p)
+                adicionado = True
+                break
+        if not adicionado:
+            linhas.append([p])
+    return linhas
+
+# Função para converter horário em minutos
+def horario_para_minutos(h):
+    horas, minutos = h.split(":")
+    return int(horas) * 60 + int(minutos)
+
+def remover_duplicados(horarios):
+    vistos = []
+    for h in horarios:
+        if h not in vistos:
+            vistos.append(h)
+    return vistos
+
+# Função para extrair os dias e horários de uma página do PDF
+def extrair_dias(pagina):
+    palavras = pagina.extract_words()
+    linhas = agrupar_por_linha(palavras)
+
+    dias = {}
+    dia_atual = None
+
+    for linha in linhas:
+        linha_ordenada = sorted(linha, key=lambda w: w["x0"])
+
+        if any(w["text"] == "Banco" for w in linha_ordenada):
+            break
+
+        possui_dt = any(
+            X_DT_MIN <= w["x0"] <= X_DT_MAX and w["text"].isdigit() and 1 <= int(w["text"]) <= 31
+            for w in linha_ordenada
+        )
+
+        if possui_dt:
+            dt = next(w["text"] for w in linha_ordenada if X_DT_MIN <= w["x0"] <= X_DT_MAX)
+            dia_atual = dt
+            dias[dia_atual] = {"ponto": [], "extra": []}
+
+        if dia_atual is None:
+            continue
+
+        for w in linha_ordenada:
+            if not padrao_hora.match(w["text"]):
+                continue
+            if X_PONTO_MIN <= w["x0"] <= X_PONTO_MAX:
+                dias[dia_atual]["ponto"].append(w["text"])
+            elif X_EXTRA_MIN <= w["x0"] <= X_EXTRA_MAX:
+                dias[dia_atual]["extra"].append(w["text"])
+
+    # Monta a sequência final: entrada + meio (ordenado) + saída
+    resultado = {}
+    for dia, grupos in dias.items():
+        ponto = grupos["ponto"]
+        extra = grupos["extra"]
+
+        if len(ponto) == 0:
+            resultado[dia] = []
+        elif len(ponto) == 1:
+            resultado[dia] = ponto
+        else:
+            entrada = ponto[0]
+            saida = ponto[-1]
+            meio = ponto[1:-1] + extra
+            meio_ordenado = sorted(meio, key=horario_para_minutos)
+            sequencia = [entrada] + meio_ordenado + [saida]
+            resultado[dia] = remover_duplicados(sequencia)
+
+    return resultado
+
+# Função para converter horário em objeto time
+def horario_para_time(txt):
+    if not txt:
+        return None
+    h, m = txt.split(":")
+    return dtime(int(h), int(m))
+
+# Função para gerar o arquivo Excel para um funcionário
+def gerar_excel_funcionario(matricula, nome, data_inicio, ultimo_dia, dias_dict, pasta_saida):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Cartao Ponto"
+    ws.column_dimensions['A'].width = 12
+
+    for d in range(1, ultimo_dia + 1):
+        chave = f"{d:02d}"
+        horarios = dias_dict.get(chave, [])
+
+        data_atual = data_inicio + timedelta(days=d - 1)
+        linha = d
+
+        cel_data = ws.cell(row=linha, column=1, value=data_atual)
+        cel_data.number_format = "dd/mm/yyyy"
+
+        for j, h in enumerate(horarios):
+            cel = ws.cell(row=linha, column=2 + j, value=horario_para_time(h))
+            cel.number_format = "[h]:mm"
+
+    nome_arquivo = f"{matricula} - {nome}.xlsx"
+    caminho = os.path.join(pasta_saida, nome_arquivo)
+    wb.save(caminho)
+    print(f"  Gerado: {caminho}")
+
+# Função principal para processar os PDFs e gerar os arquivos Excel
+def processar_pasta(pasta_pdfs, pasta_saida, callback=None):
+    os.makedirs(pasta_saida, exist_ok=True)
+
+    pdfs = sorted([
+        os.path.join(pasta_pdfs, f)
+        for f in os.listdir(pasta_pdfs)
+        if f.endswith(".pdf")
+    ])
+
+    # Dicionário acumulador por funcionário
+    funcionarios = {}
+
+    total_pdfs = len(pdfs)
+    for idx_pdf, caminho_pdf in enumerate(pdfs):
+        with pdfplumber.open(caminho_pdf) as pdf:
+            paginas = [
+                (i, p) for i, p in enumerate(pdf.pages)
+                if p.extract_text() and "Marcações Ponto" in p.extract_text()
+            ]
+            for i, pagina in paginas:
+                texto = pagina.extract_text()
+
+                match_func = padrao_funcionario.search(texto)
+                match_periodo = padrao_periodo.search(texto)
+
+                if not match_func or not match_periodo:
+                    continue
+
+                matricula = match_func.group(1)
+                nome = match_func.group(2).strip()
+                data_inicio = datetime.strptime(match_periodo.group(1), "%d/%m/%Y")
+                data_fim = datetime.strptime(match_periodo.group(2), "%d/%m/%Y")
+
+                # Inicializa funcionário se ainda não existe
+                if matricula not in funcionarios:
+                    funcionarios[matricula] = {"nome": nome, "dias": {}}
+
+                # Extrai dias e acumula
+                dias = extrair_dias(pagina)
+                for dia, horarios in dias.items():
+                    data_atual = data_inicio + timedelta(days=int(dia) - 1)
+                    chave = data_atual.strftime("%Y-%m-%d")
+                    funcionarios[matricula]["dias"][chave] = horarios
+
+        if callback:
+            callback(idx_pdf + 1, total_pdfs, os.path.basename(caminho_pdf))
+
+    # Gera um Excel por funcionário com todos os meses
+    for matricula, dados in funcionarios.items():
+        gerar_excel_funcionario_consolidado(
+            matricula, dados["nome"], dados["dias"], pasta_saida
+        )
+
+
+def gerar_excel_funcionario_consolidado(matricula, nome, dias_dict, pasta_saida):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Cartao Ponto"
+    ws.column_dimensions['A'].width = 12
+
+    chaves_ordenadas = sorted(dias_dict.keys())
+
+    for idx, chave in enumerate(chaves_ordenadas):
+        horarios = dias_dict[chave]
+        data = datetime.strptime(chave, "%Y-%m-%d")
+        linha = idx + 1
+
+        cel_data = ws.cell(row=linha, column=1, value=data)
+        cel_data.number_format = "dd/mm/yyyy"
+
+        for j, h in enumerate(horarios):
+            cel = ws.cell(row=linha, column=2 + j, value=horario_para_time(h))
+            cel.number_format = "[h]:mm"
+
+    nome_arquivo = f"{matricula} - {nome}.xlsx"
+    caminho = os.path.join(pasta_saida, nome_arquivo)
+    wb.save(caminho)
