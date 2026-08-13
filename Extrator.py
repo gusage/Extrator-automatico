@@ -221,7 +221,7 @@ def gerar_arquivos_funcionario(matricula, nome, dias_dict, pasta_saida):
         grupos = dias_dict[chave]
         ponto = grupos["ponto"]
         intervalos = grupos["intervalos"]
-        data = datetime.striptime(chave, "%Y-%m-%d")
+        data = datetime.strptime(chave, "%Y-%m-%d")
         linha = idx + 1
 
         # Linha de arquivos Horas
@@ -234,10 +234,18 @@ def gerar_arquivos_funcionario(matricula, nome, dias_dict, pasta_saida):
 
             saida_int, retorno_int = escolher_intervalo(entrada, intervalos)
 
-            ws_horas.cell(row=linha, column=2, value=horario_para_time(entrada)).number_format = "[h]:mm"
-            ws_horas.cell(row=linha, column=3, value=horario_para_time(saida_final)).number_format = "[h]:mm"
-            ws_horas.cell(row=linha, column=4, value=horario_para_time(saida_int)).number_format = "[h]:mm"
-            ws_horas.cell(row=linha, column=5, value=horario_para_time(retorno_int)).number_format = "[h]:mm"
+            # Monta sequência de horários para o arquivo Horas
+            sequencia_horas = [entrada]
+
+            if saida_int and retorno_int:
+                sequencia_horas.append(saida_int)
+                sequencia_horas.append(retorno_int)
+
+            sequencia_horas.append(saida_final)
+
+            for j, h in enumerate(sequencia_horas):
+                cel = ws_horas.cell(row=linha, column=2 + j, value=horario_para_time(h))
+                cel.number_format = "[h]:mm"
 
         # Linha arquivos Intervalos
         cel_int = ws_int.cell(row=linha, column=1, value=data)
