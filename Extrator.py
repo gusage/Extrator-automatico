@@ -208,6 +208,11 @@ def gerar_arquivos_funcionario(matricula, nome, dias_dict, pasta_saida):
     # Arquivos Horas
     wb_horas = openpyxl.Workbook()
     ws_horas = wb_horas.active
+    # Cabeçalho do arquivo Horas
+    cabeçalho_horas = ["Data", "Entrada", "Saída Intervalo", "Retorno Intervalo", "Saída Final"]
+    for col, titulo in enumerate(cabeçalho_horas, start=1):
+        cel = ws_horas.cell(row=1, column=col, value=titulo)
+        cel.font = openpyxl.styles.Font(bold=True)
     ws_horas.title = "Horas"
     ws_horas.column_dimensions['A'].width = 12
 
@@ -222,11 +227,30 @@ def gerar_arquivos_funcionario(matricula, nome, dias_dict, pasta_saida):
         ponto = grupos["ponto"]
         intervalos = grupos["intervalos"]
         data = datetime.strptime(chave, "%Y-%m-%d")
-        linha = idx + 1
+        linha = idx + 2 # Começa na linha 2, pois a linha 1 é o cabeçalho
 
         # Linha de arquivos Horas
         cel = ws_horas.cell(row=linha, column=1, value=data)
         cel.number_format = "dd/mm/yyyy"
+
+        # Descobre o máximo de pares de intervalos para montar o cabeçalho do arquivo Intervalos
+        max_pares = 0
+        for chave in chaves_ordenadas:
+            intervalos = dias_dict[chave]["intervalos"]
+            pares = len(intervalos) // 2
+            if pares > max_pares:
+                max_pares = pares
+
+        # Cabeçalho do arquivo Intervalos
+        cabeçalho_int = ["Data"]
+        for i in range(1, max_pares + 1):
+            cabeçalho_int.append(f"Saída {i}")
+            cabeçalho_int.append(f"Retorno {i}")
+        cabeçalho_int.append("Total")
+
+        for col, titulo in enumerate(cabeçalho_int, start=1):
+            cel = ws_int.cell(row=1, column=col, value=titulo)
+            cel.font = openpyxl.styles.Font(bold=True)
 
         if ponto:
             entrada = ponto[0]
@@ -255,12 +279,26 @@ def gerar_arquivos_funcionario(matricula, nome, dias_dict, pasta_saida):
         for i in range(0, len(intervalos) - 1, 2):
             pares.append((intervalos[i], intervalos[i + 1]))
 
+        total_minutos = 0
         for j, (saida, retorno) in enumerate(pares):
-            col_base = 2 + j * 3
+            col_base = 2 + j * 2
             ws_int.cell(row=linha, column=col_base, value=horario_para_time(saida)).number_format = "[h]:mm"
             ws_int.cell(row=linha, column=col_base + 1, value=horario_para_time(retorno)).number_format = "[h]:mm"
-            total = calcular_total_intervalos(saida, retorno)
-            ws_int.cell(row=linha, column=col_base + 2, value=total).number_format = "[h]:mm"
+
+            # Acumula o total sem escrever ainda
+            s = horario_para_minutos(saida)
+            r = horario_para_minutos(retorno)
+            diff = r - s
+            if diff < 0:
+                diff += 24 * 60
+            total_minutos += diff
+
+        # Escreve o total geral na última coluna
+        if pares:
+            col_total = 2 + len(pares) * 2
+            horas = total_minutos // 60
+            minutos = total_minutos % 60
+            ws_int.cell(row=linha, column=col_total, value=dtime(horas, minutos)).number_format = "[h]:mm"
 
     # Salva os dois arquivos
     wb_horas.save(os.path.join(caminho_pasta, f"{nome_pasta} - Horas.xlsx"))
